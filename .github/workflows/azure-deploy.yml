@@ -7,32 +7,60 @@ on:
 
 permissions:
   contents: read
+  id-token: write  # Required for OIDC
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     env:
       TF_IN_AUTOMATION: "true"
+      DOCKER_IMAGE_TAG: ${{ github.sha }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
-
-      - name: Azure Login
+      - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
       - name: Deploy infrastructure
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-          DOCKER_IMAGE_TAG: ${{ github.sha }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: bash ./scripts/azure_deploy.sh --quiet
+
+      - name: Get Terraform outputs
+        id: tf-outputs
+        working-directory: terraform/azure
+        run: |
+          terraform workspace select azure
+          ACR_SERVER=$(terraform output -raw acr_login_server)
+          RESOURCE_GROUP=$(terraform output -raw resource_group_name)
+          echo "acr_server=${ACR_SERVER}" >> $GITHUB_OUTPUT
+          echo "resource_group=${RESOURCE_GROUP}" >> $GITHUB_OUTPUT
+          # Extract ACR name from login server (e.g., myacr.azurecr.io -> myacr)
+          ACR_NAME=$(echo "${ACR_SERVER}" | cut -d'.' -f1)
+          echo "acr_name=${ACR_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        run: |
+          az acr login --name ${{ steps.tf-outputs.outputs.acr_name }}
+          docker build -t ${{ steps.tf-outputs.outputs.acr_server }}/bug-buster:${{ env.DOCKER_IMAGE_TAG }} .
+          docker push ${{ steps.tf-outputs.outputs.acr_server }}/bug-buster:${{ env.DOCKER_IMAGE_TAG }}
+
+      # TODO: Uncomment when Container App is created
+      # - name: Update Container App revision
+      #   run: |
+      #     az containerapp update \
+      #       --name bug-buster \
+      #       --resource-group ${{ steps.tf-outputs.outputs.resource_group }} \
+      #       --image ${{ steps.tf-outputs.outputs.acr_server }}/bug-buster:${{ env.DOCKER_IMAGE_TAG }}
 

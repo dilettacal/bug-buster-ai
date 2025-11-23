@@ -224,6 +224,8 @@ terraform.tfstate.d/
 *.auto.tfvars
 terraform.tfvars
 
+.tfplan
+
 
 temp/ 
 
