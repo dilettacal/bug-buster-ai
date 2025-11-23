@@ -98,3 +98,7 @@ status: check-docker ## Show container status
 	@echo "Container status:"
 	@docker ps -a --filter "name=$(CONTAINER_NAME)" --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 
+deploy-azure: check-docker ## Deploy infrastructure and image to Azure
+	@echo "Deploying to Azure..."
+	@./scripts/azure_deploy.sh
+

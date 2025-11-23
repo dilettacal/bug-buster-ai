@@ -100,10 +100,21 @@ if [[ -n "${DOCKER_IMAGE_TAG:-}" ]]; then
   TF_VARS+=("-var=docker_image_tag=${DOCKER_IMAGE_TAG}")
 fi
 
-maybe_echo "Destroying Azure infrastructure (Key Vault excluded)..."
-# Try destroy, if locked, suggest unlock command
-if ! terraform destroy -input=false -auto-approve "${TF_VARS[@]}" 2>&1; then
-  LOCK_ID=$(terraform force-unlock 2>&1 | grep -oP 'ID:\s+\K[^\s]+' || echo "")
+maybe_echo "Destroying Azure infrastructure (protected resources excluded)..."
+# Use -target to only destroy non-protected resources
+# This avoids trying to destroy resources with prevent_destroy lifecycle
+TARGETS=(
+  "-target=azurerm_container_app.main"
+  "-target=azurerm_container_app_environment.main"
+  "-target=azurerm_container_registry.acr"
+  "-target=azurerm_log_analytics_workspace.main"
+  "-target=azurerm_role_assignment.container_app_kv_secrets_user"
+  "-target=azurerm_role_assignment.container_app_acr_pull"
+)
+
+# Try destroy with targets, if locked, suggest unlock command
+if ! terraform destroy -input=false -auto-approve "${TF_VARS[@]}" "${TARGETS[@]}" 2>&1; then
+  LOCK_ID=$(terraform force-unlock 2>&1 | sed -n 's/.*ID:\s*\([a-f0-9-]\+\).*/\1/p' || echo "")
   if [[ -n "${LOCK_ID}" ]]; then
     maybe_echo "⚠️  State is locked. Run this to unlock:"
     maybe_echo "   cd terraform/azure && terraform force-unlock -force ${LOCK_ID}"

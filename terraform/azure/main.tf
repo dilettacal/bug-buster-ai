@@ -184,6 +184,91 @@ resource "azurerm_container_app_environment" "main" {
   }
 }
 
+# ============================================================================
+# Container App
+# ============================================================================
+
+resource "azurerm_container_app" "main" {
+  name                         = var.project_name
+  container_app_environment_id = azurerm_container_app_environment.main.id
+  resource_group_name          = data.azurerm_resource_group.main.name
+  revision_mode                 = "Single"
+
+  # SystemAssigned Managed Identity
+  identity {
+    type = "SystemAssigned"
+  }
+
+  # Ingress configuration
+  ingress {
+    external_enabled = true
+    target_port      = 8000
+    transport        = "http"
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
+  }
+
+  # Registry configuration (using Managed Identity - no passwords!)
+  # Note: Using "System" string instead of self-reference (Terraform limitation)
+  registry {
+    server   = azurerm_container_registry.acr.login_server
+    identity = "System"  # Uses the SystemAssigned identity of this Container App
+  }
+
+  # Container configuration
+  template {
+    # Use public image initially (ACR image doesn't exist yet)
+    # GitHub Actions will update this with the real image after pushing to ACR
+    container {
+      name   = var.project_name
+      image  = "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+      cpu    = 0.5
+      memory = "1.0Gi"
+
+      # Environment variables (no secrets here - use Key Vault references)
+      env {
+        name  = "PORT"
+        value = "8000"
+      }
+    }
+
+    # Scale configuration
+    min_replicas = 1
+    max_replicas = 3
+  }
+
+  tags = {
+    Environment = "production"
+    ManagedBy   = "terraform"
+  }
+
+  # Ignore template changes - GitHub Actions manages image updates via az containerapp update
+  # This prevents Terraform from trying to update the image (which can timeout)
+  lifecycle {
+    ignore_changes = [template]
+  }
+
+  # Note: secrets block is NOT included here
+  # Secrets must be added manually after deployment via Azure CLI:
+  # az containerapp secret set --key-vault-secret-id ...
+}
+
+# Grant Container App Managed Identity "Key Vault Secrets User" role
+resource "azurerm_role_assignment" "container_app_kv_secrets_user" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_container_app.main.identity[0].principal_id
+}
+
+# Grant Container App Managed Identity "AcrPull" role on ACR
+resource "azurerm_role_assignment" "container_app_acr_pull" {
+  scope                = azurerm_container_registry.acr.id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_container_app.main.identity[0].principal_id
+}
+
 # Outputs
 output "resource_group_name" {
   description = "Resource group name"
@@ -246,5 +331,22 @@ output "log_analytics_workspace_id" {
 output "container_app_environment_id" {
   description = "Container App Environment ID"
   value       = azurerm_container_app_environment.main.id
+}
+
+# Container App outputs
+output "container_app_name" {
+  description = "Container App name"
+  value       = azurerm_container_app.main.name
+}
+
+output "container_app_fqdn" {
+  description = "Container App FQDN (URL)"
+  value       = azurerm_container_app.main.latest_revision_fqdn
+}
+
+output "container_app_identity_principal_id" {
+  description = "Container App Managed Identity Principal ID (for manual secret/registry configuration)"
+  value       = azurerm_container_app.main.identity[0].principal_id
+  sensitive   = false
 }
 

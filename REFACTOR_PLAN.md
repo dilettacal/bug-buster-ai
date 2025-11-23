@@ -34,14 +34,14 @@ Refactor Terraform to follow Azure best practices:
   - [x] `Contributor` on Resource Group
 
 #### Step 3: Container App
-- [ ] Create Container App with SystemAssigned identity
-- [ ] Configure container (image, CPU, memory)
-- [ ] Configure ingress
-- [ ] **NO registry block** (add manually after creation)
-- [ ] **NO secrets block** (add manually after creation)
-- [ ] Grant Container App MI roles:
-  - `Key Vault Secrets User` on Key Vault
-  - `AcrPull` on ACR
+- [x] Create Container App with SystemAssigned identity
+- [x] Configure container (image, CPU, memory)
+- [x] Configure ingress
+- [x] **NO registry block** (add manually after creation)
+- [x] **NO secrets block** (add manually after creation)
+- [x] Grant Container App MI roles:
+  - [x] `Key Vault Secrets User` on Key Vault
+  - [x] `AcrPull` on ACR
 
 #### Step 4: Outputs
 - [ ] App URL
@@ -54,13 +54,7 @@ Refactor Terraform to follow Azure best practices:
 ### Phase 3: Post-Deployment Configuration (Manual/Azure CLI)
 
 #### Step 5: Add Registry to Container App
-```bash
-az containerapp registry set \
-  --name bug-buster \
-  --resource-group bug-buster-rg \
-  --server <acr-login-server> \
-  --identity System
-```
+- [x] Registry configured in Terraform (with Managed Identity)
 
 #### Step 6: Add Secrets to Container App
 ```bash
@@ -82,23 +76,24 @@ az containerapp secret set \
 ### Phase 4: GitHub Actions Workflow
 
 #### Step 7: Update Workflow
-- [ ] Remove `client-secret` (use OIDC only)
-- [ ] Add `id-token: write` permission
-- [ ] Add Docker build step
-- [ ] Add Docker push to ACR step
-- [ ] Add Container App revision update step
+- [x] Remove `client-secret` (use OIDC only)
+- [x] Add `id-token: write` permission
+- [x] Add Docker build step
+- [x] Add Docker push to ACR step
+- [x] Add Container App revision update step
 
 ### Phase 5: Key Vault Secrets
 
 #### Step 8: Add Secrets to Key Vault
+- [ ] Add secrets to Key Vault (use `./scripts/azure_setup_keyvault.sh kv-bug-buster`)
 ```bash
 az keyvault secret set \
-  --vault-name <kv-name> \
+  --vault-name kv-bug-buster \
   --name openai-api-key \
   --value <your-key>
 
 az keyvault secret set \
-  --vault-name <kv-name> \
+  --vault-name kv-bug-buster \
   --name semgrep-app-token \
   --value <your-token>
 ```
