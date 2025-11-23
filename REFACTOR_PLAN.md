@@ -22,8 +22,8 @@ Refactor Terraform to follow Azure best practices:
 - [x] Resource Group (use existing)
 - [x] Key Vault (RBAC enabled, no admin) - Name: `kv-bug-buster`
 - [x] Container Registry (admin disabled)
-- [ ] Log Analytics Workspace
-- [ ] Container App Environment
+- [x] Log Analytics Workspace
+- [x] Container App Environment
 
 #### Step 2: Service Principal & OIDC
 - [x] Create Azure AD Application

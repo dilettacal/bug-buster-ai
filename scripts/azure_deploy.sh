@@ -73,6 +73,15 @@ terraform workspace select azure >/dev/null
 # Prepare Terraform variables
 TF_VARS=()
 
+# In CI/CD, disable resource creation that requires elevated permissions FIRST
+# This must be set before any terraform commands
+if [[ "${CI:-}" == "true" ]]; then
+  TF_VARS+=("-var=create_terraform_role_assignment=false")
+  TF_VARS+=("-var=manage_azuread_resources=false")
+  maybe_echo "CI/CD mode: Disabling resource creation that requires elevated permissions"
+  maybe_echo "  Variables set: create_terraform_role_assignment=false, manage_azuread_resources=false"
+fi
+
 # GitHub repository is required for OIDC federated credential
 # Try to auto-detect from git remote if not set
 if [[ -z "${GITHUB_REPOSITORY:-}" ]]; then
@@ -99,42 +108,94 @@ TF_VARS+=("-var=github_repository=${GITHUB_REPOSITORY}")
 # Note: docker_image_tag is no longer used - GitHub Actions manages image tags directly
 # Terraform uses a placeholder tag to avoid state drift
 
-# Check if Key Vault exists and import it if needed (informational only - Terraform doesn't read secrets)
+# Import existing resources into Terraform state if they exist but aren't in state
 PROJECT_NAME="${PROJECT_NAME:-bug-buster}"
-WORKSPACE=$(terraform workspace show 2>/dev/null || echo "azure")
-KV_NAME="${PROJECT_NAME}-kv-${WORKSPACE}"
 RESOURCE_GROUP="${RESOURCE_GROUP:-bug-buster-rg}"
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 
-# Import Key Vault into Terraform state if it exists but isn't in state
-# Note: Must pass TF_VARS to import command to avoid prompts for required variables
-KV_RESOURCE_ID="/subscriptions/$(az account show --query id -o tsv)/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/${KV_NAME}"
-KV_IMPORTED=false
-if az keyvault show --name "${KV_NAME}" >/dev/null 2>&1; then
-  if ! terraform state show 'azurerm_key_vault.main[0]' >/dev/null 2>&1; then
-    maybe_echo "⚠️  Key Vault '${KV_NAME}' exists but not in Terraform state"
-    maybe_echo "   Import it manually if needed: terraform import ${TF_VARS[*]} azurerm_key_vault.main[0] '${KV_RESOURCE_ID}'"
-    maybe_echo "   Continuing - Terraform will handle the import during apply if needed"
-  fi
+# Function to check if resource exists in Azure and import if needed
+import_resource() {
+  local terraform_address="$1"
+  local resource_name="$2"
+  local resource_id="$3"
+  local check_command="$4"
   
-  if az keyvault secret show --vault-name "${KV_NAME}" --name "openai-api-key" >/dev/null 2>&1 && \
-     az keyvault secret show --vault-name "${KV_NAME}" --name "semgrep-app-token" >/dev/null 2>&1; then
-    maybe_echo "✓ Secrets found in Key Vault"
-  else
-    maybe_echo "⚠️  Warning: Secrets not found in Key Vault '${KV_NAME}'"
-    maybe_echo "   Add them before the Container App can start:"
-    maybe_echo "   az keyvault secret set --vault-name ${KV_NAME} --name openai-api-key --value <your-key>"
-    maybe_echo "   az keyvault secret set --vault-name ${KV_NAME} --name semgrep-app-token --value <your-token>"
+  # Check if resource exists in Azure
+  if eval "${check_command}" >/dev/null 2>&1; then
+    # Check if already in Terraform state
+    if ! terraform state show "${terraform_address}" >/dev/null 2>&1; then
+      maybe_echo "Importing existing ${resource_name} into Terraform state..."
+      terraform import "${TF_VARS[@]}" "${terraform_address}" "${resource_id}" >/dev/null 2>&1 || {
+        maybe_echo "⚠️  Failed to import ${resource_name}. Continuing - Terraform will handle it during apply"
+      }
+    fi
+  fi
+}
+
+# Define resources to import: terraform_address, display_name, resource_id, check_command
+declare -a RESOURCES_TO_IMPORT=(
+  "azurerm_key_vault.main|Key Vault|/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.KeyVault/vaults/kv-${PROJECT_NAME}|az keyvault show --name kv-${PROJECT_NAME}"
+  "azurerm_container_registry.acr|ACR|/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.ContainerRegistry/registries/${PROJECT_NAME//-/}acr|az acr show --name ${PROJECT_NAME//-/}acr"
+  "azurerm_log_analytics_workspace.main|Log Analytics Workspace|/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.OperationalInsights/workspaces/${PROJECT_NAME}-law|az monitor log-analytics workspace show --resource-group ${RESOURCE_GROUP} --workspace-name ${PROJECT_NAME}-law"
+  "azurerm_container_app_environment.main|Container App Environment|/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}/providers/Microsoft.App/managedEnvironments/${PROJECT_NAME}-env|az containerapp env show --name ${PROJECT_NAME}-env --resource-group ${RESOURCE_GROUP}"
+)
+
+# Import each resource
+for resource_info in "${RESOURCES_TO_IMPORT[@]}"; do
+  IFS='|' read -r terraform_address display_name resource_id check_command <<< "${resource_info}"
+  import_resource "${terraform_address}" "${display_name}" "${resource_id}" "${check_command}"
+done
+
+# Azure AD Application import (if exists and manage_azuread_resources is false)
+# Note: In CI/CD, we don't manage these resources, so we need to import them if they exist
+# But if manage_azuread_resources=false, Terraform won't have the resource block to import into
+# So we skip import in CI/CD - the data source will read the existing app
+if [[ "${CI:-}" != "true" ]]; then
+  # Only try to import if we're managing the resources (local mode)
+  AD_APP_NAME="${PROJECT_NAME}-github-actions"
+  AD_APP_ID=$(az ad app list --display-name "${AD_APP_NAME}" --query "[0].appId" -o tsv 2>/dev/null || echo "")
+  if [[ -n "${AD_APP_ID}" && "${AD_APP_ID}" != "null" ]]; then
+    if ! terraform state show 'azuread_application.github_actions[0]' >/dev/null 2>&1; then
+      maybe_echo "Importing existing Azure AD Application '${AD_APP_NAME}' into Terraform state..."
+      # Azure AD app import uses the application ID (client_id), not object ID
+      terraform import "${TF_VARS[@]}" 'azuread_application.github_actions[0]' "${AD_APP_ID}" >/dev/null 2>&1 || {
+        maybe_echo "⚠️  Failed to import Azure AD Application."
+      }
+    fi
+    # Also import Service Principal if it exists
+    SP_OBJECT_ID=$(az ad sp show --id "${AD_APP_ID}" --query id -o tsv 2>/dev/null || echo "")
+    if [[ -n "${SP_OBJECT_ID}" && "${SP_OBJECT_ID}" != "null" ]]; then
+      if ! terraform state show 'azuread_service_principal.github_actions[0]' >/dev/null 2>&1; then
+        maybe_echo "Importing existing Service Principal into Terraform state..."
+        terraform import "${TF_VARS[@]}" 'azuread_service_principal.github_actions[0]' "${SP_OBJECT_ID}" >/dev/null 2>&1 || {
+          maybe_echo "⚠️  Failed to import Service Principal."
+        }
+      fi
+    fi
   fi
 else
-  maybe_echo "Note: Key Vault will be created by Terraform"
+  maybe_echo "CI/CD mode: Skipping Azure AD resource imports (using data source instead)"
 fi
 
-maybe_echo "Planning Azure infrastructure changes..."
-# If Key Vault was just imported, refresh state to ensure it's recognized
-if [[ "${KV_IMPORTED}" == "true" ]]; then
-  maybe_echo "Refreshing state after Key Vault import..."
-  terraform refresh "${TF_VARS[@]}" >/dev/null 2>&1 || true
+# Verify variables are set correctly (especially in CI/CD)
+if [[ "${CI:-}" == "true" ]]; then
+  maybe_echo "Verifying CI/CD variables are set..."
+  if ! printf '%s\n' "${TF_VARS[@]}" | grep -q "manage_azuread_resources=false"; then
+    echo "ERROR: manage_azuread_resources=false not found in TF_VARS!" >&2
+    echo "TF_VARS: ${TF_VARS[*]}" >&2
+    exit 1
+  fi
+  if ! printf '%s\n' "${TF_VARS[@]}" | grep -q "create_terraform_role_assignment=false"; then
+    echo "ERROR: create_terraform_role_assignment=false not found in TF_VARS!" >&2
+    exit 1
+  fi
 fi
+
+# Refresh state after imports to ensure Terraform recognizes imported resources
+maybe_echo "Refreshing Terraform state after imports..."
+terraform refresh "${TF_VARS[@]}" >/dev/null 2>&1 || true
+
+maybe_echo "Planning Azure infrastructure changes..."
 
 if [[ "${QUIET}" -eq 1 ]]; then
   terraform plan -input=false -out="${PLAN_FILE}" "${TF_VARS[@]}" >/dev/null
@@ -156,3 +217,4 @@ if [[ "${QUIET}" -eq 0 ]]; then
   echo "Deployment complete. Key outputs:"
   terraform output
 fi
+

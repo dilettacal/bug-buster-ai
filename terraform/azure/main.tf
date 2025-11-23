@@ -64,7 +64,10 @@ data "azurerm_client_config" "current" {
 }
 
 # Grant current user/SP "Key Vault Secrets User" role for Terraform operations
+# Only create if running locally (not via GitHub Actions SP)
+# GitHub Actions SP should already have this role or it can be granted manually
 resource "azurerm_role_assignment" "terraform_secrets_user" {
+  count                = var.create_terraform_role_assignment ? 1 : 0
   scope                = azurerm_key_vault.main.id
   role_definition_name = "Key Vault Secrets User"
   principal_id         = data.azurerm_client_config.current.object_id
@@ -75,7 +78,9 @@ resource "azurerm_role_assignment" "terraform_secrets_user" {
 # ============================================================================
 
 # Azure AD Application for GitHub Actions
+# Only create if manage_azuread_resources is true (not in CI/CD)
 resource "azuread_application" "github_actions" {
+  count        = var.manage_azuread_resources ? 1 : 0
   display_name = "${var.project_name}-github-actions"
   description  = "Service Principal for GitHub Actions CI/CD via OIDC"
 
@@ -86,7 +91,8 @@ resource "azuread_application" "github_actions" {
 
 # Service Principal
 resource "azuread_service_principal" "github_actions" {
-  client_id = azuread_application.github_actions.client_id
+  count    = var.manage_azuread_resources ? 1 : 0
+  client_id = azuread_application.github_actions[0].client_id
 
   lifecycle {
     prevent_destroy = true  # OIDC setup is one-time, preserve GitHub Secrets configuration
@@ -95,7 +101,8 @@ resource "azuread_service_principal" "github_actions" {
 
 # Federated Identity Credential for GitHub Actions OIDC
 resource "azuread_application_federated_identity_credential" "github_actions" {
-  application_id = azuread_application.github_actions.id
+  count         = var.manage_azuread_resources ? 1 : 0
+  application_id = azuread_application.github_actions[0].id
   display_name   = "github-actions-oidc"
   description    = "Federated identity for GitHub Actions"
   audiences      = ["api://AzureADTokenExchange"]
@@ -110,9 +117,10 @@ resource "azuread_application_federated_identity_credential" "github_actions" {
 # Grant Service Principal "Contributor" role on Resource Group
 # (This allows GitHub Actions to manage resources in the resource group)
 resource "azurerm_role_assignment" "github_actions_contributor" {
+  count                = var.manage_azuread_resources ? 1 : 0
   scope                = data.azurerm_resource_group.main.id
   role_definition_name = "Contributor"
-  principal_id         = azuread_service_principal.github_actions.object_id
+  principal_id         = azuread_service_principal.github_actions[0].object_id
 }
 
 # ============================================================================
@@ -135,10 +143,45 @@ resource "azurerm_container_registry" "acr" {
 
 # Grant GitHub Actions SP "AcrPush" role on ACR
 # (This allows GitHub Actions to push Docker images)
+# Note: In CI/CD, this requires the SP to already exist and be imported
 resource "azurerm_role_assignment" "github_actions_acr_push" {
+  count                = var.manage_azuread_resources ? 1 : 0
   scope                = azurerm_container_registry.acr.id
   role_definition_name = "AcrPush"
-  principal_id         = azuread_service_principal.github_actions.object_id
+  principal_id         = azuread_service_principal.github_actions[0].object_id
+}
+
+# ============================================================================
+# Log Analytics Workspace
+# ============================================================================
+
+resource "azurerm_log_analytics_workspace" "main" {
+  name                = "${var.project_name}-law"
+  location            = data.azurerm_resource_group.main.location
+  resource_group_name = data.azurerm_resource_group.main.name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+
+  tags = {
+    Environment = "production"
+    ManagedBy   = "terraform"
+  }
+}
+
+# ============================================================================
+# Container App Environment
+# ============================================================================
+
+resource "azurerm_container_app_environment" "main" {
+  name                       = "${var.project_name}-env"
+  location                   = data.azurerm_resource_group.main.location
+  resource_group_name        = data.azurerm_resource_group.main.name
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.main.id
+
+  tags = {
+    Environment = "production"
+    ManagedBy   = "terraform"
+  }
 }
 
 # Outputs
@@ -163,9 +206,13 @@ output "location" {
 }
 
 # GitHub Actions OIDC outputs (for GitHub Secrets)
+# Note: In CI/CD mode (manage_azuread_resources=false), client_id is not available
+# because the Service Principal lacks permissions to read Azure AD resources.
+# The client_id should already be in GitHub Secrets from the initial local setup.
 output "github_actions_client_id" {
   description = "Service Principal Client ID for GitHub Actions (add to GitHub Secrets as AZURE_CLIENT_ID)"
-  value       = azuread_application.github_actions.client_id
+  value       = var.manage_azuread_resources ? azuread_application.github_actions[0].client_id : null
+  sensitive   = false
 }
 
 output "github_actions_tenant_id" {
@@ -187,5 +234,17 @@ output "acr_login_server" {
 output "acr_name" {
   description = "ACR name"
   value       = azurerm_container_registry.acr.name
+}
+
+# Log Analytics Workspace output
+output "log_analytics_workspace_id" {
+  description = "Log Analytics Workspace ID"
+  value       = azurerm_log_analytics_workspace.main.id
+}
+
+# Container App Environment output
+output "container_app_environment_id" {
+  description = "Container App Environment ID"
+  value       = azurerm_container_app_environment.main.id
 }
 

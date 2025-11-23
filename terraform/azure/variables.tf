@@ -25,3 +25,15 @@ variable "resource_group_name" {
   default     = "bug-buster-rg"
 }
 
+variable "create_terraform_role_assignment" {
+  description = "Whether to create role assignment for current user/SP (set to false in CI/CD if SP lacks permissions)"
+  type        = bool
+  default     = true
+}
+
+variable "manage_azuread_resources" {
+  description = "Whether to create/manage Azure AD resources (set to false in CI/CD - resources must exist and be imported)"
+  type        = bool
+  default     = true
+}
+
